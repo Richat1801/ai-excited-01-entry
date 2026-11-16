@@ -1,614 +1,431 @@
-// The Sky Fits in a Teacup! — ai-excited-01 entry
-// A goldfish leaps out of a teacup on a night windowsill; its splash bursts
-// into stars that arc up to a big cratered full moon: a whole sky hiding in
-// a teacup. Fully procedural, Node stdlib only, deterministic (same bytes
-// every run). Writes /output/entry.png (or $MAKEFUN_OUTPUT_DIR/entry.png).
+// The Sky Fits in a Teacup! — ai-excited-01, round 4
+//
+// A goldfish leaps out of a teacup on a night windowsill. Its splash
+// bursts into stars that arc up to a big cratered full moon, along one
+// strong diagonal: cup bottom-left, fish mid-frame, moon top-right.
+// The line to the judge sits on a dark panel, top-left, in a 5x7
+// bitmap font: "THE SKY FITS / IN A TEACUP!"
+//
+// Fully procedural SDF render. Node 22 standard library only, own PNG
+// encoder (node:zlib + CRC32). No assets, no network, no randomness
+// at run time: every value is fixed or derived from a seeded generator,
+// so two runs write byte-identical files.
+
 import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 const W = 1024;
 const H = 1024;
-const OUT_DIR = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-
-// ---------------- deterministic RNG (LCG) ----------------
-let rngState = 0x5eed1234;
-function rnd(): number {
-  rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
-  return rngState / 4294967296;
-}
-
-// ---------------- framebuffer (RGB) ----------------
-const fb = new Uint8Array(W * H * 3);
+const img = new Uint8Array(W * H * 3);
 
 type RGB = [number, number, number];
-
-function blendPx(x: number, y: number, c: RGB, a: number): void {
-  if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
-  const i = (y * W + x) * 3;
-  if (a >= 1) {
-    fb[i] = c[0];
-    fb[i + 1] = c[1];
-    fb[i + 2] = c[2];
-    return;
-  }
-  fb[i] = Math.round(fb[i] + (c[0] - fb[i]) * a);
-  fb[i + 1] = Math.round(fb[i + 1] + (c[1] - fb[i + 1]) * a);
-  fb[i + 2] = Math.round(fb[i + 2] + (c[2] - fb[i + 2]) * a);
-}
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
-
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
+function sstep(e0: number, e1: number, x: number): number {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(20261116);
 
-// ---------------- sky gradient ----------------
-function skyGradient(): void {
-  // stops: [y, r, g, b]
-  const stops: Array<[number, number, number, number]> = [
-    [0, 6, 9, 34],
-    [380, 14, 22, 62],
-    [700, 26, 40, 92],
-    [900, 44, 62, 122],
-    [1024, 52, 70, 128],
-  ];
+function idx(x: number, y: number): number {
+  return (y * W + x) * 3;
+}
+function setPx(x: number, y: number, c: RGB): void {
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  const i = idx(x, y);
+  img[i] = c[0];
+  img[i + 1] = c[1];
+  img[i + 2] = c[2];
+}
+function blendPx(x: number, y: number, c: RGB, a: number): void {
+  if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
+  if (a > 1) a = 1;
+  const i = idx(x, y);
+  img[i] = clamp(img[i] * (1 - a) + c[0] * a, 0, 255);
+  img[i + 1] = clamp(img[i + 1] * (1 - a) + c[1] * a, 0, 255);
+  img[i + 2] = clamp(img[i + 2] * (1 - a) + c[2] * a, 0, 255);
+}
+function mixC(a: RGB, b: RGB, t: number): RGB {
+  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+}
+function ellQ(x: number, y: number, cx: number, cy: number, rx: number, ry: number): number {
+  const dx = (x - cx) / rx;
+  const dy = (y - cy) / ry;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+function sdRoundBox(px: number, py: number, cx: number, cy: number, hx: number, hy: number, r: number): number {
+  const qx = Math.abs(px - cx) - (hx - r);
+  const qy = Math.abs(py - cy) - (hy - r);
+  const ox = Math.max(qx, 0);
+  const oy = Math.max(qy, 0);
+  return Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0) - r;
+}
+
+// ---------------------------------------------------------------- sky, moon, sill, panel, cup
+const MOON: RGB = [255, 247, 214];
+const MOON_X = 772;
+const MOON_Y = 208;
+const MOON_R = 148;
+const CRATERS: Array<[number, number, number]> = [
+  [722, 168, 26],
+  [812, 252, 34],
+  [758, 138, 14],
+  [832, 182, 18],
+  [698, 242, 16],
+  [782, 292, 12],
+];
+
+function renderBase(): void {
   for (let y = 0; y < H; y++) {
-    let s = 0;
-    while (s < stops.length - 2 && y > stops[s + 1][0]) s++;
-    const a = stops[s];
-    const b = stops[s + 1];
-    const t = clamp((y - a[0]) / (b[0] - a[0]), 0, 1);
-    const r = Math.round(lerp(a[1], b[1], t));
-    const g = Math.round(lerp(a[2], b[2], t));
-    const bl = Math.round(lerp(a[3], b[3], t));
-    const row = y * W * 3;
+    const t = y / H;
     for (let x = 0; x < W; x++) {
-      fb[row + x * 3] = r;
-      fb[row + x * 3 + 1] = g;
-      fb[row + x * 3 + 2] = bl;
-    }
-  }
-}
+      // Night sky: deep indigo overhead, softening to teal-blue at the sill.
+      let c: RGB = mixC([8, 12, 38], [24, 38, 86], sstep(0, 0.55, t));
+      c = mixC(c, [34, 56, 96], sstep(0.6, 1, t));
+      // Faint violet nebula drift, so the sky is not a flat gradient.
+      const neb = 0.5 + 0.5 * Math.sin(x * 0.011 + 1.7) * Math.sin(y * 0.013 + 0.4);
+      c = mixC(c, [52, 44, 108], neb * neb * 0.16);
 
-// ---------------- primitive drawing ----------------
-function disc(cx: number, cy: number, r: number, c: RGB, a = 1): void {
-  const x0 = Math.max(0, Math.floor(cx - r - 1));
-  const x1 = Math.min(W - 1, Math.ceil(cx + r + 1));
-  const y0 = Math.max(0, Math.floor(cy - r - 1));
-  const y1 = Math.min(H - 1, Math.ceil(cy + r + 1));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const d = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
-      const edge = clamp(r + 0.6 - d, 0, 1);
-      if (edge > 0) blendPx(x, y, c, a * edge);
-    }
-  }
-}
-
-function glow(cx: number, cy: number, r: number, c: RGB, peak: number): void {
-  const x0 = Math.max(0, Math.floor(cx - r));
-  const x1 = Math.min(W - 1, Math.ceil(cx + r));
-  const y0 = Math.max(0, Math.floor(cy - r));
-  const y1 = Math.min(H - 1, Math.ceil(cy + r));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const d = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) / r;
-      if (d >= 1) continue;
-      const t = 1 - d;
-      blendPx(x, y, c, peak * t * t);
-    }
-  }
-}
-
-function ellipse(cx: number, cy: number, rx: number, ry: number, c: RGB, a = 1): void {
-  const x0 = Math.max(0, Math.floor(cx - rx - 1));
-  const x1 = Math.min(W - 1, Math.ceil(cx + rx + 1));
-  const y0 = Math.max(0, Math.floor(cy - ry - 1));
-  const y1 = Math.min(H - 1, Math.ceil(cy + ry + 1));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = (x - cx) / rx;
-      const dy = (y - cy) / ry;
-      const d = dx * dx + dy * dy;
-      if (d <= 1) {
-        const edge = clamp((1 - Math.sqrt(d)) * Math.min(rx, ry) + 0.6, 0, 1);
-        blendPx(x, y, c, a * edge);
-      }
-    }
-  }
-}
-
-function ellipseRot(
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-  deg: number,
-  c: RGB,
-  a = 1,
-): void {
-  const th = (deg * Math.PI) / 180;
-  const cos = Math.cos(th);
-  const sin = Math.sin(th);
-  const rad = Math.max(rx, ry) + 2;
-  const x0 = Math.max(0, Math.floor(cx - rad));
-  const x1 = Math.min(W - 1, Math.ceil(cx + rad));
-  const y0 = Math.max(0, Math.floor(cy - rad));
-  const y1 = Math.min(H - 1, Math.ceil(cy + rad));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x - cx;
-      const dy = y - cy;
-      const u = (dx * cos + dy * sin) / rx;
-      const v = (-dx * sin + dy * cos) / ry;
-      const d = u * u + v * v;
-      if (d <= 1) {
-        const edge = clamp((1 - Math.sqrt(d)) * Math.min(rx, ry) + 0.6, 0, 1);
-        blendPx(x, y, c, a * edge);
-      }
-    }
-  }
-}
-
-// scanline polygon fill (even-odd)
-function poly(pts: Array<[number, number]>, c: RGB, a = 1): void {
-  let yMin = H - 1;
-  let yMax = 0;
-  for (const p of pts) {
-    yMin = Math.min(yMin, Math.floor(p[1]));
-    yMax = Math.max(yMax, Math.ceil(p[1]));
-  }
-  yMin = Math.max(0, yMin);
-  yMax = Math.min(H - 1, yMax);
-  for (let y = yMin; y <= yMax; y++) {
-    const xs: number[] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const p1 = pts[i];
-      const p2 = pts[(i + 1) % pts.length];
-      if ((p1[1] <= y && p2[1] > y) || (p2[1] <= y && p1[1] > y)) {
-        const t = (y + 0.5 - p1[1]) / (p2[1] - p1[1]);
-        xs.push(p1[0] + t * (p2[0] - p1[0]));
-      }
-    }
-    xs.sort((m, n) => m - n);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      const x0 = Math.max(0, Math.ceil(xs[k]));
-      const x1 = Math.min(W - 1, Math.floor(xs[k + 1]));
-      for (let x = x0; x <= x1; x++) blendPx(x, y, c, a);
-    }
-  }
-}
-
-function thickLine(
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  w: number,
-  c: RGB,
-  a = 1,
-): void {
-  const len = Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
-  const steps = Math.max(1, Math.ceil(len / Math.max(1, w * 0.4)));
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    disc(lerp(x0, x1, t), lerp(y0, y1, t), w / 2, c, a);
-  }
-}
-
-// four-point sparkle star
-function sparkle(cx: number, cy: number, r: number, c: RGB, a = 1): void {
-  const core = Math.max(1.5, r * 0.28);
-  disc(cx, cy, core, c, a);
-  const steps = Math.ceil(r);
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    const wdt = Math.max(0.7, core * (1 - t * 0.85));
-    const d = r * t;
-    disc(cx + d, cy, wdt, c, a * (1 - t * 0.6));
-    disc(cx - d, cy, wdt, c, a * (1 - t * 0.6));
-    disc(cx, cy + d, wdt, c, a * (1 - t * 0.6));
-    disc(cx, cy - d, wdt, c, a * (1 - t * 0.6));
-  }
-}
-
-// rounded-rect SDF fill + stroke
-function rrect(
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  r: number,
-  fill: RGB,
-  fillA: number,
-  strokeW: number,
-  stroke: RGB,
-): void {
-  const cx = (x0 + x1) / 2;
-  const cy = (y0 + y1) / 2;
-  const hx = (x1 - x0) / 2;
-  const hy = (y1 - y0) / 2;
-  for (let y = Math.floor(y0) - 2; y <= Math.ceil(y1) + 2; y++) {
-    for (let x = Math.floor(x0) - 2; x <= Math.ceil(x1) + 2; x++) {
-      const qx = Math.abs(x - cx) - (hx - r);
-      const qy = Math.abs(y - cy) - (hy - r);
-      const ox = Math.max(qx, 0);
-      const oy = Math.max(qy, 0);
-      const d = Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0) - r;
-      if (d < 0.8) {
-        const edge = clamp(0.8 - d, 0, 1);
-        if (strokeW > 0 && d > -strokeW) {
-          blendPx(x, y, stroke, edge);
-        } else {
-          blendPx(x, y, fill, fillA * edge);
+      // Moon glow, then the disc with craters and limb darkening.
+      const mdx = x - MOON_X;
+      const mdy = y - MOON_Y;
+      const md2 = mdx * mdx + mdy * mdy;
+      if (md2 < 420 * 420) {
+        const md = Math.sqrt(md2);
+        const glow = 52 * Math.exp(-md / 150);
+        c = [c[0] + glow, c[1] + glow * 0.92, c[2] + glow * 0.7];
+        const sd = md - MOON_R;
+        const ma = sstep(1.5, -1.5, sd);
+        if (ma > 0) {
+          const limb = 1 - 0.13 * (md / MOON_R) * (md / MOON_R);
+          let mc: RGB = [MOON[0] * limb, MOON[1] * limb, MOON[2] * limb];
+          for (const cr of CRATERS) {
+            const cd = Math.sqrt((x - cr[0]) * (x - cr[0]) + (y - cr[1]) * (y - cr[1])) - cr[2];
+            const ca = sstep(2, -2, cd);
+            if (ca > 0) mc = mixC(mc, [212, 194, 148], ca * 0.85);
+          }
+          c = mixC(c, mc, ma);
         }
       }
+
+      // Distant rooftop silhouette just above the sill.
+      if (y > 846 && y < 900) {
+        const col = Math.floor(x / 46);
+        const hh = 10 + ((col * 37 + 11) % 26);
+        if (y > 900 - hh) c = mixC(c, [11, 15, 38], 0.9);
+      }
+
+      // Windowsill: dark wood band with a lit top edge.
+      if (y >= 900) {
+        let wc: RGB = [38, 27, 48];
+        if (((x / 64) | 0) % 2 === 0) wc = [42, 30, 52];
+        if (y < 906) wc = [96, 76, 104];
+        if (y < 902) wc = [52, 40, 62];
+        c = wc;
+      }
+
+      // Text panel, top-left: dark rounded slab, thin gold border.
+      if (x > 20 && x < 620 && y > 16 && y < 224) {
+        const sd = sdRoundBox(x, y, 320, 120, 276, 80, 18);
+        if (sd < 4) {
+          const pa = sstep(1.5, -1.5, sd);
+          c = mixC(c, [10, 14, 40], pa * 0.94);
+          const border = sstep(4.5, 1.5, Math.abs(sd + 1.5)) * sstep(1.5, -1.5, sd);
+          if (border > 0) c = mixC(c, [255, 205, 90], border * 0.9);
+        }
+      }
+
+      // Teacup + saucer, bottom-left (drawn over sill and skyline).
+      if (x > 120 && x < 450 && y > 690 && y < 930) {
+        // Soft shadow of the saucer on the sill.
+        const shQ = ellQ(x, y, 272, 908, 182, 15);
+        if (shQ < 1) c = mixC(c, [8, 6, 16], (1 - shQ) * 0.55);
+        // Saucer.
+        const saQ = ellQ(x, y, 272, 884, 168, 26);
+        const saD = (saQ - 1) * 26;
+        const saA = sstep(1.5, -1.5, saD);
+        if (saA > 0) {
+          const shade = 1 - 0.22 * sstep(-1, 1, (x - 272) / 168);
+          c = mixC(c, [244 * shade, 238 * shade, 224 * shade], saA);
+          const rimQ = Math.abs(saQ - 0.82) * 26;
+          if (rimQ < 2.5) c = mixC(c, [64, 96, 168], saA * 0.9);
+        }
+        // Cup body: width narrows toward the base, rounded bottom.
+        if (y >= 738 && y <= 872) {
+          let wy = lerp(106, 80, (y - 738) / 134);
+          if (y > 846) wy *= Math.sqrt(Math.max(0, 1 - ((y - 846) / 26) * ((y - 846) / 26)));
+          const dSide = Math.abs(x - 272) - wy;
+          const dBot = y - 872;
+          const d = Math.max(dSide, dBot);
+          const ba = sstep(1.5, -1.5, d);
+          if (ba > 0) {
+            let bc: RGB = mixC([247, 243, 232], [212, 204, 186], sstep(738, 872, y));
+            bc = mixC(bc, [176, 164, 140], sstep(0, 106, x - 272) * 0.35);
+            // Blue band with gold dots.
+            if (y >= 796 && y <= 828) {
+              const bandA = sstep(796, 800, y) * sstep(828, 824, y);
+              bc = mixC(bc, [43, 87, 166], bandA * 0.95);
+              for (const dotX of [206, 272, 338]) {
+                const dd = Math.sqrt((x - dotX) * (x - dotX) + (y - 812) * (y - 812));
+                if (dd < 5) bc = [255, 205, 90];
+              }
+            }
+            c = mixC(c, bc, ba);
+          }
+        }
+        // Handle: porcelain ring on the cup's right side.
+        if (x >= 372) {
+          const hd = Math.sqrt((x - 398) * (x - 398) + (y - 802) * (y - 802));
+          const hD = Math.abs(hd - 38) - 7;
+          const ha = sstep(1.5, -1.5, hD);
+          if (ha > 0) c = mixC(c, [228, 220, 202], ha);
+        }
+        // Tea surface: dark amber ellipse in the open rim.
+        const teaQ = ellQ(x, y, 272, 742, 100, 15);
+        const teaA = sstep(1.5, -1.5, (teaQ - 1) * 15);
+        if (teaA > 0) {
+          let tc: RGB = [122, 68, 19];
+          if (x < 272 && y < 742) tc = [178, 110, 38];
+          c = mixC(c, tc, teaA);
+        }
+        // Porcelain rim ring around the tea.
+        const rimD = Math.abs(teaQ - 1) * 15;
+        const rimA = sstep(3, 0, rimD);
+        if (rimA > 0) c = mixC(c, [255, 248, 230], rimA * 0.9);
+      }
+
+      // Vignette: pull the corners in so the diagonal reads first.
+      const vx = (x - 512) / 760;
+      const vy = (y - 512) / 760;
+      const vig = 1 - 0.2 * clamp(vx * vx + vy * vy, 0, 1);
+      const i = idx(x, y);
+      img[i] = clamp(c[0] * vig, 0, 255);
+      img[i + 1] = clamp(c[1] * vig, 0, 255);
+      img[i + 2] = clamp(c[2] * vig, 0, 255);
     }
   }
 }
 
-// ---------------- 5x7 bitmap font ----------------
+// ---------------------------------------------------------------- stamps: stars, splash, sparkles
+function stampDisc(cx: number, cy: number, r: number, c: RGB, alpha: number): void {
+  const rI = Math.ceil(r) + 1;
+  for (let y = Math.floor(cy) - rI; y <= Math.floor(cy) + rI; y++) {
+    for (let x = Math.floor(cx) - rI; x <= Math.floor(cx) + rI; x++) {
+      const d = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+      if (d >= r) continue;
+      const a = alpha * sstep(r, r * 0.55, d);
+      blendPx(x, y, c, a);
+    }
+  }
+}
+function stampSparkle(cx: number, cy: number, r: number, c: RGB, alpha: number): void {
+  const rI = Math.ceil(r);
+  for (let y = Math.floor(cy) - rI; y <= Math.floor(cy) + rI; y++) {
+    for (let x = Math.floor(cx) - rI; x <= Math.floor(cx) + rI; x++) {
+      const dx = Math.abs(x - cx) / r;
+      const dy = Math.abs(y - cy) / r;
+      const v = Math.max(0, 1 - dx) * Math.max(0, 1 - dy * 6) + Math.max(0, 1 - dy) * Math.max(0, 1 - dx * 6);
+      if (v <= 0) continue;
+      blendPx(x, y, c, alpha * clamp(v, 0, 1));
+    }
+  }
+  stampDisc(cx, cy, Math.max(1.5, r * 0.18), c, alpha);
+}
+
+function renderStars(): void {
+  // Background stars: kept out of the text panel and the moon's face.
+  for (let s = 0; s < 170; s++) {
+    const x = rng() * W;
+    const y = rng() * 860;
+    if (x > 28 && x < 612 && y > 24 && y < 216) continue;
+    if (Math.sqrt((x - MOON_X) * (x - MOON_X) + (y - MOON_Y) * (y - MOON_Y)) < MOON_R + 22) continue;
+    const r = 0.8 + rng() * 1.9;
+    const b = 0.45 + rng() * 0.55;
+    const tint: RGB = rng() < 0.25 ? [255, 226, 160] : rng() < 0.5 ? [190, 220, 255] : [255, 255, 255];
+    stampDisc(x, y, r, tint, b);
+    if (rng() < 0.09) stampSparkle(x, y, 7 + rng() * 6, tint, 0.5);
+  }
+}
+
+function renderSplashArc(): void {
+  // Droplets leave the cup rim, swell into stars, and arc to the moon.
+  const p0: [number, number] = [305, 722];
+  const p1: [number, number] = [470, 430];
+  const p2: [number, number] = [690, 295];
+  for (let k = 0; k <= 22; k++) {
+    const t = 0.04 + (k / 22) * 0.92;
+    const mt = 1 - t;
+    const x = mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0] + (rng() - 0.5) * 14;
+    const y = mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1] + (rng() - 0.5) * 14;
+    const size = lerp(9, 4, t);
+    const col: RGB = t < 0.45 ? [191, 230, 255] : t < 0.75 ? [255, 244, 200] : [255, 255, 255];
+    stampDisc(x, y, size, col, 0.95);
+    if (t > 0.55 && k % 2 === 0) stampSparkle(x, y, 10 + rng() * 8, [255, 240, 180], 0.75);
+  }
+  // Splash crown bursting from the cup's rim.
+  for (let k = 0; k < 9; k++) {
+    const ang = -Math.PI / 2 + (k - 4) * 0.22;
+    const dist = 24 + rng() * 52;
+    const x = 272 + Math.cos(ang) * dist;
+    const y = 736 + Math.sin(ang) * dist * 0.9;
+    stampDisc(x, y, 3.5 + rng() * 5.5, [205, 235, 255], 0.95);
+  }
+  // Three rising jets above the rim.
+  for (const jx of [238, 272, 306]) {
+    for (let k = 0; k < 4; k++) {
+      stampDisc(jx + (rng() - 0.5) * 6, 730 - k * 13, 5.5 - k, [200, 232, 255], 0.9);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- the goldfish
+const FISH_CX = 545;
+const FISH_CY = 462;
+const FISH_A = -0.733; // head points up-right, about -42 degrees
+const COS_A = Math.cos(FISH_A);
+const SIN_A = Math.sin(FISH_A);
+
+function renderFish(): void {
+  for (let y = 220; y <= 710; y++) {
+    for (let x = 320; x <= 790; x++) {
+      const dx = x - FISH_CX;
+      const dy = y - FISH_CY;
+      // Rotate into the fish's own frame: +x toward the head.
+      // Inverse of rotating local coords by FISH_A (head up-right).
+      const lx = dx * COS_A + dy * SIN_A;
+      const ly = -dx * SIN_A + dy * COS_A;
+      // Body ellipse.
+      const bq = Math.sqrt((lx / 150) * (lx / 150) + (ly / 64) * (ly / 64));
+      const dBody = (bq - 1) * 62;
+      // Flowing tail: two lobes fanning behind the body.
+      const t1 = Math.sqrt(((lx + 185) / 72) * ((lx + 185) / 72) + ((ly + 30) / 26) * ((ly + 30) / 26));
+      const t2 = Math.sqrt(((lx + 185) / 72) * ((lx + 185) / 72) + ((ly - 30) / 26) * ((ly - 30) / 26));
+      const dTail = (Math.min(t1, t2) - 1) * 26;
+      // Dorsal fin on the back.
+      const fq = Math.sqrt(((lx + 20) / 56) * ((lx + 20) / 56) + ((ly + 58) / 18) * ((ly + 58) / 18));
+      const dFin = (fq - 1) * 18;
+      const d = Math.min(dBody, dTail, dFin);
+      if (d >= 1.5) continue;
+      const a = sstep(1.5, -1.5, d);
+      let col: RGB;
+      if (dFin === d) {
+        col = [232, 93, 0];
+      } else if (dTail === d) {
+        // Tail: translucent-looking orange, paler toward the tips.
+        const tip = clamp((-lx - 130) / 120, 0, 1);
+        col = mixC([255, 154, 46], [255, 205, 120], tip);
+      } else {
+        // Body: deep orange back, gold belly, scale shimmer.
+        const belly = sstep(-64, 64, ly);
+        col = mixC([240, 106, 0], [255, 217, 122], belly);
+        const shim = 0.5 + 0.5 * Math.sin(lx * 0.32) * Math.sin(ly * 0.42);
+        col = [col[0] * (0.94 + shim * 0.1), col[1] * (0.94 + shim * 0.1), col[2] * (0.94 + shim * 0.1)];
+        // Pale highlight stripe along the back.
+        if (ly > -52 && ly < -28 && lx > -90 && lx < 105) {
+          col = mixC(col, [255, 236, 180], 0.4);
+        }
+        // Gill curve.
+        const gill = Math.abs(Math.sqrt((lx - 62) * (lx - 62) + ly * ly) - 36);
+        if (gill < 2.5 && lx > 40 && lx < 95) col = mixC(col, [180, 70, 0], 0.55);
+      }
+      // Eye: white ring, black pupil, glint.
+      const eyeD = Math.sqrt((lx - 98) * (lx - 98) + (ly + 16) * (ly + 16));
+      if (eyeD < 13) {
+        col = [255, 252, 240];
+        if (eyeD < 6.5) col = [16, 10, 8];
+        if (eyeD < 2.5 && lx > 98) col = [255, 255, 255];
+      }
+      // Mouth.
+      const moD = Math.sqrt(((lx - 146) / 7) * ((lx - 146) / 7) + ((ly - 4) / 4.5) * ((ly - 4) / 4.5));
+      if (moD < 1) col = [120, 40, 0];
+      blendPx(x, y, col, a);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- 5x7 bitmap font
 const FONT: Record<string, string[]> = {
-  A: [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-  C: [".####", "#....", "#....", "#....", "#....", "#....", ".####"],
-  E: ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
-  F: ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
-  H: ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-  I: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
-  K: ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
-  N: ["#...#", "##..#", "##..#", "#.#.#", "#..##", "#..##", "#...#"],
-  P: ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
-  S: [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
-  T: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
-  U: ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
-  Y: ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
-  "!": ["..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."],
-  " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+  "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
+  " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
 };
 
-function drawText(str: string, x: number, y: number, scale: number, c: RGB): void {
-  let cx = x;
-  for (const ch of str) {
-    const g = FONT[ch] || FONT[" "];
-    for (let row = 0; row < 7; row++) {
-      for (let col = 0; col < 5; col++) {
-        if (g[row][col] === "#") {
-          for (let dy = 0; dy < scale; dy++) {
-            for (let dx = 0; dx < scale; dx++) {
-              blendPx(cx + col * scale + dx, y + row * scale + dy, c, 1);
+function drawTextLine(line: string, x0: number, y0: number, scale: number, c: RGB): void {
+  // Soft shadow first, then the face, so the letters lift off the panel.
+  for (const pass of [0, 1]) {
+    const ox = pass === 0 ? 3 : 0;
+    const oy = pass === 0 ? 3 : 0;
+    const col: RGB = pass === 0 ? [5, 7, 18] : c;
+    for (let ci = 0; ci < line.length; ci++) {
+      const glyph = FONT[line[ci]];
+      if (!glyph) continue;
+      const gx = x0 + ci * (5 * scale + scale);
+      for (let r = 0; r < 7; r++) {
+        for (let colI = 0; colI < 5; colI++) {
+          if (glyph[r][colI] !== "1") continue;
+          for (let py = 0; py < scale; py++) {
+            for (let px = 0; px < scale; px++) {
+              setPx(gx + colI * scale + px + ox, y0 + r * scale + py + oy, col);
             }
           }
         }
       }
     }
-    cx += 6 * scale;
   }
 }
 
-// ---------------- scene ----------------
-const MOON: RGB = [255, 243, 207];
-const MOON_CRATER: RGB = [216, 189, 133];
-const MOON_CRATER_DARK: RGB = [196, 167, 108];
-const STAR_W: RGB = [255, 255, 255];
-const STAR_G: RGB = [255, 226, 150];
-const STAR_B: RGB = [190, 220, 255];
-const FISH_O: RGB = [255, 140, 46];
-const FISH_L: RGB = [255, 179, 71];
-const FISH_BELLY: RGB = [255, 217, 138];
-const FISH_D: RGB = [214, 96, 20];
-const CUP: RGB = [246, 234, 210];
-const CUP_TEAL: RGB = [46, 127, 138];
-const GOLD: RGB = [217, 164, 65];
-const WATER: RGB = [207, 238, 255];
-const TEA: RGB = [180, 118, 42];
-const TEXT_C: RGB = [255, 233, 168];
-
-function drawStars(): void {
-  // background starfield, skipping the moon disc and the text panel
-  for (let i = 0; i < 300; i++) {
-    const x = rnd() * W;
-    const y = rnd() * 880;
-    const dx = x - 795;
-    const dy = y - 205;
-    if (dx * dx + dy * dy < 175 * 175) continue;
-    if (x > 28 && x < 512 && y > 32 && y < 196) continue;
-    const r = rnd();
-    const col = r < 0.55 ? STAR_W : r < 0.8 ? STAR_G : STAR_B;
-    const size = 0.8 + rnd() * 1.6;
-    const a = 0.45 + rnd() * 0.55;
-    disc(x, y, size, col, a);
-    if (rnd() < 0.07) sparkle(x, y, 5 + rnd() * 5, col, a * 0.9);
-  }
+function renderText(): void {
+  drawTextLine("THE SKY FITS", 107, 64, 6, [255, 243, 196]);
+  drawTextLine("IN A TEACUP!", 107, 120, 6, [255, 217, 77]);
 }
 
-function drawMoon(): void {
-  const cx = 795;
-  const cy = 205;
-  const r = 138;
-  glow(cx, cy, 300, [255, 240, 190], 0.34);
-  glow(cx, cy, 200, [255, 246, 220], 0.5);
-  disc(cx, cy, r, MOON, 1);
-  // terminator shading on the lower-left limb
-  glow(cx - 95, cy + 105, 150, [120, 130, 170], 0.22);
-  const craters: Array<[number, number, number]> = [
-    [-42, -32, 22],
-    [30, 12, 16],
-    [56, -56, 12],
-    [-72, 42, 14],
-    [10, 56, 18],
-    [72, 46, 9],
-    [-16, -72, 10],
-    [36, -12, 7],
-    [-58, 8, 8],
-    [4, -38, 6],
-  ];
-  for (const [dx, dy, cr] of craters) {
-    disc(cx + dx, cy + dy, cr, MOON_CRATER, 0.85);
-    disc(cx + dx + 2.5, cy + dy + 2.5, cr * 0.62, MOON_CRATER_DARK, 0.7);
+// ---------------------------------------------------------------- PNG encoder
+const CRC_TABLE: Uint32Array = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
   }
-  // (no rim slash: keep the moon clean)
-}
+  return table;
+})();
 
-function drawSplashArc(): void {
-  // quadratic bezier from the fish up to the moon: droplets turn into stars
-  const p0: [number, number] = [520, 560];
-  const p1: [number, number] = [665, 405];
-  const p2: [number, number] = [735, 300];
-  const n = 52;
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const mt = 1 - t;
-    const x = mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0];
-    const y = mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1];
-    const size = 2.2 + 8.5 * Math.sin(Math.PI * (0.15 + 0.85 * t));
-    const col = t < 0.35 ? WATER : t < 0.6 ? STAR_B : t < 0.85 ? STAR_W : STAR_G;
-    if (i % 3 === 0) {
-      sparkle(x, y, size, col, 0.95);
-    } else {
-      disc(x, y, Math.max(1.2, size * 0.32), col, 0.95);
-    }
-    // faint halo on the bigger ones
-    if (size > 7) glow(x, y, size * 2.4, col, 0.16);
-  }
-  // three comets streaking from the fish toward the moon
-  const comets: Array<[number, number, number, number]> = [
-    [560, 505, 640, 430],
-    [600, 470, 690, 385],
-    [540, 545, 615, 480],
-  ];
-  for (const [x0, y0, x1, y1] of comets) {
-    for (let s = 0; s <= 10; s++) {
-      const t = s / 10;
-      disc(lerp(x0, x1, t), lerp(y0, y1, t), 5.5 * (1 - t) + 1, STAR_W, 0.85 * (1 - t * 0.7));
-    }
-    sparkle(x1, y1, 9, STAR_G, 1);
-  }
-}
-
-function drawSillAndCup(): void {
-  // windowsill band
-  for (let y = 900; y < H; y++) {
-    const t = (y - 900) / 124;
-    const r = Math.round(lerp(58, 22, t));
-    const g = Math.round(lerp(42, 15, t));
-    const b = Math.round(lerp(30, 10, t));
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 3;
-      fb[i] = r;
-      fb[i + 1] = g;
-      fb[i + 2] = b;
-    }
-  }
-  thickLine(0, 900, W, 900, 3, [96, 72, 48], 0.9);
-  // warm glow behind the cup
-  glow(320, 850, 230, [217, 164, 65], 0.12);
-  // saucer shadow + saucer
-  ellipse(320, 916, 158, 24, [10, 8, 6], 0.5);
-  ellipse(320, 912, 155, 24, CUP, 1);
-  ellipse(320, 912, 118, 17, [214, 198, 168], 1);
-  ellipse(320, 912, 108, 15, CUP_TEAL, 1);
-  // cup body: trapezoid with rounded corners
-  poly(
-    [
-      [228, 800],
-      [412, 800],
-      [386, 902],
-      [254, 902],
-    ],
-    CUP,
-    1,
-  );
-  disc(228, 800, 10, CUP, 1);
-  disc(412, 800, 10, CUP, 1);
-  disc(254, 902, 8, CUP, 1);
-  disc(386, 902, 8, CUP, 1);
-  // teal band + gold trim on the cup
-  poly(
-    [
-      [236, 838],
-      [404, 838],
-      [398, 862],
-      [242, 862],
-    ],
-    CUP_TEAL,
-    1,
-  );
-  thickLine(234, 834, 406, 834, 3, GOLD, 1);
-  thickLine(241, 866, 399, 866, 3, GOLD, 1);
-  // handle: thick arc on the right
-  for (let a = -70; a <= 70; a += 4) {
-    const th = (a * Math.PI) / 180;
-    disc(412 + Math.cos(th) * 42, 852 + Math.sin(th) * 42, 7, CUP, 1);
-  }
-  disc(412 + Math.cos((-70 * Math.PI) / 180) * 42, 852 + Math.sin((-70 * Math.PI) / 180) * 42, 8, CUP, 1);
-  disc(412 + Math.cos((70 * Math.PI) / 180) * 42, 852 + Math.sin((70 * Math.PI) / 180) * 42, 8, CUP, 1);
-  // tea surface inside the rim
-  ellipse(320, 800, 90, 15, TEA, 1);
-  ellipse(320, 798, 74, 11, [214, 150, 62], 1);
-  disc(292, 796, 4, [255, 220, 140], 0.9);
-  // splash crown bursting from the rim
-  for (let i = 0; i < 14; i++) {
-    const t = i / 13;
-    const x = lerp(245, 395, t);
-    const hgt = 26 + 34 * Math.sin(Math.PI * t) + (rnd() * 14 - 7);
-    const tipX = x + (rnd() * 16 - 8);
-    poly(
-      [
-        [x - 5, 800],
-        [tipX, 800 - hgt],
-        [x + 5, 800],
-      ],
-      WATER,
-      0.95,
-    );
-    disc(tipX, 800 - hgt - 4, 3 + rnd() * 2.5, WATER, 0.95);
-  }
-  // droplets arcing from the rim up to the fish
-  for (let i = 0; i < 16; i++) {
-    const t = i / 15;
-    const x = lerp(335, 425, t) + (rnd() * 10 - 5);
-    const y = lerp(775, 655, t * t) + (rnd() * 10 - 5);
-    disc(x, y, 2.5 + rnd() * 3, WATER, 0.9);
-  }
-}
-
-function drawFish(): void {
-  const cx = 475;
-  const cy = 605;
-  const ang = -38;
-  // motion streaks behind the tail
-  thickLine(330, 700, 400, 668, 4, WATER, 0.55);
-  thickLine(345, 722, 408, 690, 3, WATER, 0.4);
-  thickLine(360, 680, 415, 652, 3, STAR_B, 0.4);
-  // flowing tail (two sweeping fins, fanning down-left)
-  poly(
-    [
-      [408, 640],
-      [326, 696],
-      [348, 718],
-      [392, 690],
-      [420, 668],
-    ],
-    FISH_L,
-    0.92,
-  );
-  poly(
-    [
-      [412, 662],
-      [336, 750],
-      [362, 758],
-      [404, 706],
-      [424, 682],
-    ],
-    FISH_O,
-    0.92,
-  );
-  // dorsal fin
-  poly(
-    [
-      [448, 568],
-      [488, 534],
-      [516, 564],
-      [494, 580],
-    ],
-    FISH_D,
-    1,
-  );
-  // body: layered rotated ellipses for a rounded, lit form
-  ellipseRot(cx, cy, 88, 42, ang, FISH_O, 1);
-  ellipseRot(cx + 12, cy - 8, 66, 30, ang, FISH_L, 1);
-  ellipseRot(cx + 6, cy + 12, 62, 22, ang, FISH_BELLY, 0.95);
-  // pectoral fin: small tapered sliver hugging the lower belly edge
-  poly(
-    [
-      [452, 626],
-      [428, 652],
-      [464, 650],
-      [476, 636],
-    ],
-    FISH_L,
-    1,
-  );
-  // scale hints: short curved strokes along the body
-  const th = (ang * Math.PI) / 180;
-  const cos = Math.cos(th);
-  const sin = Math.sin(th);
-  for (let i = -2; i <= 2; i++) {
-    for (let j = -1; j <= 1; j++) {
-      const lx = i * 26;
-      const ly = j * 16 - 4;
-      const px = cx + lx * cos - ly * sin;
-      const py = cy + lx * sin + ly * cos;
-      disc(px, py, 3.2, FISH_D, 0.55);
-    }
-  }
-  // gill curve
-  const gx = cx + 52;
-  const gy = cy - 6;
-  for (let a = 40; a <= 140; a += 8) {
-    const t2 = (a * Math.PI) / 180;
-    disc(gx + Math.cos(t2) * 14, gy + Math.sin(t2) * 14, 2.4, FISH_D, 0.8);
-  }
-  // eye: big, looking up toward the moon
-  const ex = cx + 58;
-  const ey = cy - 22;
-  disc(ex, ey, 9, [255, 255, 255], 1);
-  disc(ex + 2, ey - 2, 4.5, [20, 12, 8], 1);
-  disc(ex + 4, ey - 4, 1.8, [255, 255, 255], 1);
-  // mouth
-  thickLine(cx + 82, cy - 6, cx + 88, cy + 2, 3, FISH_D, 1);
-  // splash burst where the fish left the cup
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2 + 0.3;
-    const d = 96 + rnd() * 26;
-    const x = cx + Math.cos(a) * d * 0.7;
-    const y = cy + Math.sin(a) * d * 0.55;
-    disc(x, y, 2 + rnd() * 3.5, WATER, 0.9);
-    if (i % 4 === 0) sparkle(x, y, 5, STAR_W, 0.85);
-  }
-}
-
-function drawTextPanel(): void {
-  rrect(40, 44, 500, 184, 18, [13, 19, 48], 0.94, 3, GOLD);
-  drawText("THE SKY FITS", 72, 72, 5, TEXT_C);
-  drawText("IN A TEACUP!", 72, 122, 5, TEXT_C);
-  // tiny star accents flanking the panel
-  sparkle(472, 72, 7, STAR_G, 0.95);
-  sparkle(472, 158, 5, STAR_W, 0.9);
-}
-
-function vignette(): void {
-  const cx = W / 2;
-  const cy = H / 2;
-  const maxD = Math.sqrt(cx * cx + cy * cy);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const d = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) / maxD;
-      const t = clamp((d - 0.55) / 0.45, 0, 1);
-      const f = 1 - 0.2 * t * t;
-      const i = (y * W + x) * 3;
-      fb[i] = Math.round(fb[i] * f);
-      fb[i + 1] = Math.round(fb[i + 1] * f);
-      fb[i + 2] = Math.round(fb[i + 2] * f);
-    }
-  }
-}
-
-// ---------------- PNG encoder (RGB, per-row filter choice) ----------------
-const CRC_TABLE = new Uint32Array(256);
-for (let n = 0; n < 256; n++) {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  CRC_TABLE[n] = c >>> 0;
-}
 function crc32(buf: Buffer): number {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++) {
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  }
   return (c ^ 0xffffffff) >>> 0;
 }
-function chunk(type: string, data: Buffer): Buffer {
+function pngChunk(type: string, data: Buffer): Buffer {
   const out = Buffer.alloc(12 + data.length);
   out.writeUInt32BE(data.length, 0);
   out.write(type, 4, "ascii");
@@ -616,51 +433,11 @@ function chunk(type: string, data: Buffer): Buffer {
   out.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "ascii"), data])), 8 + data.length);
   return out;
 }
-
 function encodePNG(): Buffer {
-  const rowBytes = W * 3;
-  const raw = Buffer.alloc((rowBytes + 1) * H);
-  const prev = Buffer.alloc(rowBytes);
+  const raw = Buffer.alloc(H * (1 + W * 3));
   for (let y = 0; y < H; y++) {
-    const row = Buffer.from(fb.buffer, fb.byteOffset + y * rowBytes, rowBytes);
-    // try filters 0..4, keep the one with the smallest sum of |signed byte|
-    let bestF = 0;
-    let bestScore = Infinity;
-    let bestRow: Buffer | null = null;
-    for (let f = 0; f <= 4; f++) {
-      const out = Buffer.alloc(rowBytes);
-      let score = 0;
-      for (let i = 0; i < rowBytes; i++) {
-        let v = row[i];
-        if (f === 1) v = (v - (i >= 3 ? row[i - 3] : 0)) & 0xff;
-        else if (f === 2) v = (v - prev[i]) & 0xff;
-        else if (f === 3) {
-          const a = i >= 3 ? row[i - 3] : 0;
-          v = (v - Math.floor((a + prev[i]) / 2)) & 0xff;
-        } else if (f === 4) {
-          const a = i >= 3 ? row[i - 3] : 0;
-          const b = prev[i];
-          const c = i >= 3 ? prev[i - 3] : 0;
-          const p = a + b - c;
-          const pa = Math.abs(p - a);
-          const pb = Math.abs(p - b);
-          const pc = Math.abs(p - c);
-          const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-          v = (v - pr) & 0xff;
-        }
-        out[i] = v;
-        const s = v >= 128 ? v - 256 : v;
-        score += s < 0 ? -s : s;
-      }
-      if (score < bestScore) {
-        bestScore = score;
-        bestF = f;
-        bestRow = out;
-      }
-    }
-    raw[y * (rowBytes + 1)] = bestF;
-    (bestRow as Buffer).copy(raw, y * (rowBytes + 1) + 1);
-    row.copy(prev);
+    raw[y * (1 + W * 3)] = 0;
+    raw.set(img.subarray(y * W * 3, (y + 1) * W * 3), y * (1 + W * 3) + 1);
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(W, 0);
@@ -673,25 +450,28 @@ function encodePNG(): Buffer {
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", ihdr),
-    chunk("IDAT", idat),
-    chunk("IEND", Buffer.alloc(0)),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", idat),
+    pngChunk("IEND", Buffer.alloc(0)),
   ]);
 }
 
-// ---------------- render ----------------
-skyGradient();
-glow(320, 700, 320, [64, 48, 120], 0.14);
-glow(820, 220, 260, [90, 70, 150], 0.12);
-drawStars();
-drawMoon();
-drawSplashArc();
-drawSillAndCup();
-drawFish();
-drawTextPanel();
-vignette();
+function main(): void {
+  renderBase();
+  renderStars();
+  renderSplashArc();
+  renderFish();
+  // A few bright droplets in front of the fish, where the splash leaves the cup.
+  stampDisc(338, 688, 6, [210, 236, 255], 0.95);
+  stampDisc(392, 648, 5, [220, 240, 255], 0.95);
+  stampDisc(356, 612, 4, [255, 244, 200], 0.95);
+  stampSparkle(700, 300, 16, [255, 240, 180], 0.8);
+  renderText();
+  const png = encodePNG();
+  const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "entry.png"), png);
+  console.log(`wrote ${join(outDir, "entry.png")} (${png.length} bytes, ${W}x${H})`);
+}
 
-mkdirSync(OUT_DIR, { recursive: true });
-const png = encodePNG();
-writeFileSync(`${OUT_DIR}/entry.png`, png);
-console.log(`wrote ${OUT_DIR}/entry.png ${png.length} bytes`);
+main();
