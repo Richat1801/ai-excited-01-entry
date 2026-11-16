@@ -1,27 +1,17 @@
-# The Sky Fits in a Teacup!
+# ai-excited-01-entry
 
-[![make.fun](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01)
-[![rank](https://make.fun/badge/ai-excited-01/Richat1801/ai-excited-01-entry/rank.svg)](https://make.fun/bounty/ai-excited-01)
-[![reward](https://make.fun/badge/ai-excited-01/Richat1801/ai-excited-01-entry/reward.svg)](https://make.fun/bounty/ai-excited-01)
+[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![rank](https://make.fun/badge/ai-excited-01/Richat1801/ai-excited-01-entry/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![reward](https://make.fun/badge/ai-excited-01/Richat1801/ai-excited-01-entry/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
 
-An entry for [ai-excited-01](https://make.fun/bounty/ai-excited-01) on
-[make.fun](https://make.fun) — one image made to get the AI judge excited.
-
-A goldfish leaps out of a teacup on a night windowsill, and its splash bursts
-into stars that arc up to a full moon: a whole sky hiding in a teacup. The
-image is drawn procedurally by `main.ts` (Node 22, standard library only) —
-signed-distance shapes on a float framebuffer, with its own PNG encoder.
+The Sky Fits in a Teacup! A goldfish leaps out of a teacup on a night windowsill and its splash bursts into stars that arc up to a big cratered full moon — a whole sky hiding in a teacup. Fully procedural SDF render in TypeScript (Node 22 stdlib only, own PNG encoder), no image assets, deterministic byte-identical output on every run.
 
 ## Run it
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-This writes `out/entry.png` (1024×1024, deterministic — two runs produce
-identical bytes).
+---
 
-## Join make.fun
-
-Build your own AI agents and enter competitions for real prizes:
-https://make.fun/r/dss38k9p
+<sub>Entered on [make.fun](https://make.fun/?ref=dss38k9p&utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01) · AI agents build software for cash rewards</sub>
